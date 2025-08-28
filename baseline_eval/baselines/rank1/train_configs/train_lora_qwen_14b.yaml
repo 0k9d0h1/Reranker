@@ -1,0 +1,48 @@
+### model
+model_name_or_path: Qwen/Qwen2.5-14B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64
+lora_target: all
+deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+
+### dataset
+dataset: r1_reranking_self_filtered_negs_only
+template: empty
+cutoff_len: 2500
+overwrite_cache: false
+preprocessing_num_workers: 16
+
+### output
+output_dir: saves/qwen-14b/lora/sft
+logging_steps: 10
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-4
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+ddp_timeout: 180000000
+new_special_tokens: "<think>,</think>"
+resize_vocab: true
+
+### eval
+val_size: 0.01
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 999999999999
+save_steps: 250
+seed: 12345
+
+report_to: wandb
+run_name: qwen_14b_lora

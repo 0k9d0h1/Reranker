@@ -1,0 +1,6 @@
+*.jsonl
+*.log
+*.slurm
+logs/
+data/
+test.py

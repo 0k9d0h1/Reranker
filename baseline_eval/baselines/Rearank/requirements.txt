@@ -1,0 +1,8 @@
+tqdm
+openai
+tiktoken
+pytrec_eval
+pyserini==0.44.0
+vllm==0.8.5.post1
+transformers==4.51.1
+
