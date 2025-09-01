@@ -9,7 +9,7 @@ RERANKERS=(
     # "rank_zephyr" \
     # "rearank" \
     # "reasonrank" \
-    "rank1" \
+    # "rank1" \
     "rank_r1"
 ) # Add all your reranker names here
 
@@ -17,7 +17,7 @@ RERANKERS=(
 echo "========================================================="
 echo "RUNNING EXPERIMENT FOR: baseline"
 echo "========================================================="
-python3 -m baseline_eval.ZSLLM_baseline_rerankers --reranker-name "baseline"
+# python3 -m baseline_eval.ZSLLM_baseline_rerankers --reranker-name "baseline"
 # echo "Baseline experiment finished."
 export VLLM_USE_V1=0
 export NCCL_P2P_DISABLE=1
