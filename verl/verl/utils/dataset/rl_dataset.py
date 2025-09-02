@@ -336,6 +336,7 @@ class RLHFDataset(Dataset):
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
+        print(row_dict)
         return row_dict
 
     def __getstate__(self):

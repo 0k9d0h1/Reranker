@@ -30,7 +30,6 @@ class DocumentIn(BaseModel):
 
 class RerankRequest(BaseModel):
     query: str
-    model_name: str  # e.g., "rank_t5", "rank_r1"
 
 
 # --- 3. Internal Data Structures & Reranker Logic (same as before) ---
@@ -104,7 +103,9 @@ class SplitRAGReranker:
         concurrency: int = 32,
         retriever_url: str = "http://localhost:8888/retrieve",
         retriever_initial_topk: int = 50,
-        vllm_url: str = "http://localhost:8001/retrieve",
+        vllm_url: str = "http://localhost:8001/v1",
+        temperature: float = 0.6,
+        top_p: float = 0.95,
         **kwargs,
     ):
         self.max_output_tokens = max_output_tokens
@@ -132,12 +133,12 @@ class SplitRAGReranker:
         )
         self.semaphore = asyncio.Semaphore(concurrency)
 
-        self.sampling_params = SamplingParams(
-            temperature=0,
-            max_tokens=max_output_tokens,
-            logprobs=20,
-            skip_special_tokens=False,
-        )
+        self.sampling_params = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_output_tokens,
+            "logprobs": 20,
+        }
 
     async def get_completion(
         self, client, model_name, prompt, sampling_params, semaphore
@@ -194,10 +195,10 @@ class SplitRAGReranker:
         # Process complete responses first
         for i, output in enumerate(outputs):
             text = output.text
-            response_ids = output.token_ids
-            token_count = len(response_ids)
+            tokens = output.logprobs.tokens
+            token_count = len(tokens)
 
-            pattern = r"<answer>(.*?)\s*Score:"
+            pattern = r"<answer>(.*?)\s*</answer>:"
             match = re.search(pattern, text, re.DOTALL)
             if match:
                 reasoning = match.group(1).strip()
@@ -206,8 +207,8 @@ class SplitRAGReranker:
             all_reasonings[i] = reasoning
 
             score_token_idx = None
-            for idx in range(len(response_ids) - 1, len(response_ids) - 6, -1):
-                if response_ids[idx] in set(self.score_token_list):
+            for idx in range(len(tokens) - 1, len(tokens) - 6, -1):
+                if tokens[idx] in set([str(i) for i in range(1, self.max_score + 1)]):
                     score_token_idx = idx
                     break
 
@@ -217,25 +218,24 @@ class SplitRAGReranker:
                 all_scores[i] = (0, 0)
                 continue
 
-            score_integer = int(self.tokenizer.decode(response_ids[score_token_idx]))
-            score_logit = output.logprobs[score_token_idx][
-                self.score_token_list[score_integer - 1]
-            ]  # score_integer - 1 because score starts from 1
-            prob_score = math.exp(score_logit)
+            score_integer = int(tokens[score_token_idx])
+            logprob_score = output.logprobs.token_logprobs[score_token_idx]
 
             all_outputs[i] = text
             all_output_token_counts[i] = token_count
-            all_scores[i] = (score_integer, prob_score)
+            all_scores[i] = (score_integer, logprob_score)
 
         return all_outputs, all_reasonings, all_output_token_counts, all_scores
 
     def return_prompt(self, query, doc_content) -> str:
+        title = doc_content.split("\n")[0]
+        text = "\n".join(doc_content.split("\n")[1:])
         return (
             "Determine if the following passage is relevant to the query. "
             f"First, think step by step and provide the reason why the passage is relevant to the query with the relevance score in 1 to {self.max_score}(The bigger, the more relevant). "
-            "Write your final reason of relevance and score in this format after your step by step thought: <answer> {Final reason of relevance} Score: {relevance score} </answer>\n"
+            "Write your final reason of relevance and score in this format after your step by step thought like this format: <answer> {Final reason of relevance} Score: {relevance score} </answer>\n"
             f"Query: {query}\n"
-            f"Passage: {doc_content}\n"
+            f"Passage: (Title: {title}) {text}\n"
         )  # force the model to start with this
 
     def _prepare_prompts_for_rethink(
@@ -248,15 +248,12 @@ class SplitRAGReranker:
         return [s + f"\n{rethink_text}" for s in stripped_texts], just_generated_texts
 
     @torch.inference_mode()
-    async def predict(self, input_to_rerank, **kwargs):
+    async def predict(self, queries, passages, **kwargs):
         """This is setup to run with mteb but can be adapted to your purpose
         input_to_rerank: {"queries": queries, "documents": documents}
         """
-        queries = input_to_rerank["queries"]
-        passages = input_to_rerank["documents"]
-
         prompts = [
-            self.return_prompt(query, passage, self.dataset_prompt)
+            self.return_prompt(query, passage)
             for query, passage in zip(queries, passages)
         ]
         print(f"Example prompt: ```\n{prompts[0]}\n```")
@@ -265,13 +262,15 @@ class SplitRAGReranker:
         return texts, reasonings, scores
 
     async def rerank(self, query: str) -> RerankResult:
-        documents = self.retriever.batch_retrieve(
+        documents = self.retriever.retrieve(
             query, self.retriever_config["top_k_initial"]
         )
         queries = [query] * len(documents)
         corpus = [doc.text for doc in documents]
-        _, reasonings, scores = await self.predict(list(zip(queries, corpus)))
+        _, reasonings, scores = await self.predict(queries=queries, passages=corpus)
         # Sort documents and reasoning by scores
+        for document, score in zip(documents, scores):
+            document.score = score
         sorted_indices = sorted(
             range(len(scores)), key=lambda i: (scores[i][0], scores[i][1]), reverse=True
         )
@@ -287,11 +286,11 @@ reranker_model: Optional[Any] = None
 
 
 @app.post("/rerank")
-def rerank_endpoint(request: RerankRequest):
+async def rerank_endpoint(request: RerankRequest):
     """Endpoint to rerank documents using the loaded model."""
     if reranker_model is None:
         raise HTTPException(status_code=503, detail="Reranker model not loaded.")
-    result = reranker_model.rerank(request.query)
+    result = await reranker_model.rerank(request.query)
 
     return {
         "documents": [d.__dict__ for d in result.documents],
@@ -332,12 +331,6 @@ if __name__ == "__main__":
         help="The maximum output token length of the model.",
     )
     parser.add_argument(
-        "--num-gpus",
-        type=int,
-        required=True,
-        help="Number of gpus being used.",
-    )
-    parser.add_argument(
         "--max-score",
         type=int,
         default=5,
@@ -367,21 +360,21 @@ if __name__ == "__main__":
         required=True,
         help="The url for the vLLM server.",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,
+        help="The temperature to use for sampling.",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.95,
+        help="The top-p sampling probability.",
+    )
     args = parser.parse_args()
 
-    # Configuration for model paths
-    RERANKER_PATHS = {
-        "rank1": "jhu-clsp/rank1-7b",  # Placeholder
-    }
-
-    if args.model_name not in RERANKER_PATHS:
-        raise ValueError(
-            f"Unknown model name: {args.model_name}. Must be one of {list(RERANKER_PATHS.keys())}"
-        )
-
-    model_path = RERANKER_PATHS[args.model_name]
-
-    print(f"Loading single reranker model: {args.model_name} from {model_path}")
+    print(f"Using single reranker model: {args.model_name_or_path}")
     reranker_model = SplitRAGReranker(
         model_name_or_path=args.model_name_or_path,
         max_output_tokens=args.max_output_tokens,
@@ -390,8 +383,10 @@ if __name__ == "__main__":
         retriever_url=args.retriever_url,
         retriever_initial_topk=args.retriever_initial_topk,
         vllm_url=args.vllm_url,
+        temperature=args.temperature,
+        top_p=args.top_p,
     )
 
-    print(f"Model {args.model_name} loaded. Starting server...")
+    print(f"Model {args.model_name_or_path} loaded. Starting server...")
 
     uvicorn.run(app, host="0.0.0.0", port=8002)

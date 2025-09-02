@@ -1,6 +1,7 @@
 *.jsonl
 *.log
 *.slurm
+*.whl
 logs/
 data/
 test.py
