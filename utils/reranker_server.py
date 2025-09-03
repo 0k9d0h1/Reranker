@@ -6,7 +6,6 @@ import re
 import asyncio
 from tqdm.asyncio import tqdm_asyncio
 import openai
-import math
 import torch
 import requests
 import time
@@ -14,11 +13,60 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Any, Optional, Dict
 from transformers import AutoTokenizer
-from vllm import SamplingParams
+import subprocess
+from contextlib import contextmanager
 
 # --- Imports from previous skeleton ---
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+
+LOCAL_PORT = 7999
+REMOTE_PORT = 8000
+SSH_SERVER = "kdh0901@bass.snu.ac.kr"
+
+
+@contextmanager
+def ssh_tunnel(local_port, remote_port, ssh_server):
+    """A context manager to establish and clean up an SSH tunnel."""
+
+    # The SSH command to start the tunnel
+    ssh_command = [
+        "ssh",
+        "-L",
+        f"{local_port}:localhost:{remote_port}",
+        ssh_server,
+        "-N",  # Do not execute a remote command
+    ]
+
+    tunnel_process = None
+    try:
+        # 1. SETUP: Start the SSH tunnel process
+        print("[*] Starting SSH tunnel...")
+        tunnel_process = subprocess.Popen(ssh_command)
+
+        # Give the tunnel a moment to establish
+        time.sleep(2)
+
+        # Check if the process started correctly
+        if tunnel_process.poll() is not None:
+            raise RuntimeError(
+                "SSH tunnel failed to start. Check credentials/connection."
+            )
+
+        print(
+            f"[*] Tunnel active: localhost:{local_port} -> {ssh_server}:{remote_port}"
+        )
+
+        # 2. YIELD: The code inside the 'with' block runs here
+        yield
+
+    finally:
+        # 3. TEARDOWN: This code runs after the 'with' block finishes or fails
+        if tunnel_process:
+            print("\n[*] Terminating the SSH tunnel process.")
+            tunnel_process.terminate()
+            tunnel_process.wait()
+            print("[*] Tunnel closed.")
 
 
 # --- 2. Pydantic Models for API Contract ---
@@ -389,4 +437,5 @@ if __name__ == "__main__":
 
     print(f"Model {args.model_name_or_path} loaded. Starting server...")
 
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    with ssh_tunnel(LOCAL_PORT, REMOTE_PORT, SSH_SERVER):
+        uvicorn.run(app, host="0.0.0.0", port=8002)

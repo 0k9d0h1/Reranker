@@ -2,6 +2,10 @@
 *.log
 *.slurm
 *.whl
+*.out
+
 logs/
 data/
+outputs/
+
 test.py

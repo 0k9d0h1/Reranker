@@ -1,7 +1,7 @@
 tools:
   - class_name: "verl.verl.tools.reranker_tool.RerankerTool"
     config:
-      reranker_server_url: "http://localhost:8002/run_code"
+      reranker_server_url: "http://localhost:8002/rerank"
       return_full_document: False
 
     tool_schema:

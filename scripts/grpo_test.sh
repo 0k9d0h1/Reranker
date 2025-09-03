@@ -10,8 +10,6 @@ TOOL_CONFIG="$HOME/Desktop/Reranker/utils/reranker_tool.yaml"
 TRAIN_DATA="./data/searchR1_processed_direct/train.parquet"
 VAL_DATA="./data/searchR1_processed_direct/test.parquet"
 
-export CUDA_VISIBLE_DEVICES=6,7
-
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_batch_size=8 \

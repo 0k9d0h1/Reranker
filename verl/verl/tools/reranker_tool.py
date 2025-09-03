@@ -15,12 +15,12 @@
 
 import logging
 import os
-import requests
 import time
 from typing import Any, Optional
 from uuid import uuid4
 
-from verl.utils.reward_score import gsm8k
+import requests
+
 from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
@@ -68,9 +68,7 @@ class RerankerTool(BaseTool):
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema
 
-    async def create(
-        self, instance_id: Optional[str] = None, **kwargs
-    ) -> tuple[str, ToolResponse]:
+    async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
         if instance_id is None:
             instance_id = str(uuid4())
         self._instance_dict[instance_id] = {
@@ -84,10 +82,8 @@ class RerankerTool(BaseTool):
         query = parameters.get("query", "")
         self._instance_dict[instance_id]["query"] = query
 
-        data = {
-            "query": query
-        }
-        
+        data = {"query": query}
+
         rerank_text = await self.rerank_request(data)
         return ToolResponse(text=rerank_text), 0.0, {}
 
@@ -101,26 +97,28 @@ class RerankerTool(BaseTool):
         retries = 3
         for i in range(retries):
             try:
-                response = requests.post(
-                    self.reranker_server_url, json=data
-                )
+                response = requests.post(self.reranker_server_url, json=data)
                 response.raise_for_status()
                 data = response.json()  # Expects a list of results
 
-                rerank_text = "<information>\n"
-                for idx, (document, reasoning) in enumerate(zip(data["documents"], data["reasonings"])):
+                rerank_text = ""
+                # rerank_text += "<information>\n"
+                for idx, (document, reasoning) in enumerate(zip(data["documents"], data["reasonings"], strict=False)):
                     content = document["text"]
                     if self.return_full_document:
                         title = content.split("\n")[0]
                         text = "\n".join(content.split("\n")[1:])
-                        rerank_text += f"Doc {idx + 1}(Title: {title}) {text}\nReasoning about Doc {idx + 1}'s relevance to the query: {reasoning}\n"
+                        rerank_text += (
+                            f"Doc {idx + 1}(Title: {title}) {text}\n"
+                            f"Reasoning about Doc {idx + 1}'s relevance to the query: {reasoning}\n"
+                        )
                     else:
                         rerank_text += f"Reasoning about Doc {idx + 1}'s relevance to the query: {reasoning}\n"
-                rerank_text += "</information>\n"
+                # rerank_text += "</information>\n"
                 return rerank_text
             except requests.exceptions.RequestException as e:
                 print(f"Retriever request failed: {e}. Retrying ({i + 1}/{retries})...")
                 if i < retries - 1:
                     time.sleep(0.5)
                 else:
-                    raise RuntimeError("API call to reranker server failed")
+                    raise RuntimeError("API call to reranker server failed") from e

@@ -19,7 +19,6 @@ Preprocess the GSM8k dataset to parquet format
 
 import argparse
 import os
-import re
 
 import datasets
 
@@ -31,7 +30,7 @@ def make_instruction(question):
 
 Before performing any search or providing an answer, you must first reason about your next action, including before your initial search.
 
-After reasoning, if you require more information to answer the question, you may call the reranker function. The reranker function will return the top results between <information> and </information>.
+After reasoning, if you require more information to answer the question, you may call the reranker function by placing your query between <search> and </search>. The reranker function will return the top results between <tool_response> and </tool_response>.
 
 If the retrieved results do not contain enough information for answering the question, perform additional searches to gather more context.
 Continue searching iteratively until you have gathered sufficient information to respond accurately.
@@ -55,37 +54,21 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["dev"]
 
-    instruction_following = "Let's think step by step and output the final answer after `####`."
+    instruction_following = (
+        "Let's think step by step and output the final answer after `####`."
+    )
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             question_raw = example.pop("question")
             golden_answers = example.pop("golden_answers")
-
             question = make_instruction(question_raw)
-            tool_prompt = """You are a helpful assistant.
-
-# Tools
-
-You may call one or more functions to assist with the user query.
-<tools>
-{"type": "function", "function": {"name": "reranker", "description": "A tool for searching and reranking documents for a query.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The query to search for."}}, "required": ["query"]}}}
-</tools>
-
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{"name": <function-name>, "arguments": <args-json-object>}
-</tool_call>"""
 
             data = {
                 "data_source": data_source,
                 "agent_name": "tool_agent",
                 "prompt": [
-                    {
-                        "role": "system",
-                        "content": tool_prompt
-                    },
                     {
                         "role": "user",
                         "content": question,

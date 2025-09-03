@@ -552,7 +552,14 @@ class SGLangRollout(BaseRollout):
         logger.info(f"Initialize tools from configuration.: tool_list: {tool_list}")
         tool_schemas = [tool.get_openai_tool_schema().model_dump() for tool in tool_list]
         tool_map = {tool.name: tool for tool in tool_list}
-        tool_call_parser_type = get_tool_call_parser_type(processing_class)
+
+        if (
+            config.multi_turn.get("tool_call_parser_type") is not None
+            and config.multi_turn.get("tool_call_parser_type") == "reranker"
+        ):
+            tool_call_parser_type = "reranker"
+        else:
+            tool_call_parser_type = get_tool_call_parser_type(processing_class)
         sgl_tools = [Tool.model_validate(tool_schema) for tool_schema in tool_schemas]
         function_call_parser = FunctionCallParser(
             sgl_tools,
