@@ -63,12 +63,13 @@ class RerankerTool(BaseTool):
         super().__init__(config, tool_schema)
         self._instance_dict = {}
         self.reranker_server_url = config.get("reranker_server_url", "http://localhost:8002/rerank")
+        self.reranker_topk = config.get("reranker_topk", 3)
         self.return_full_document = config.get("return_full_document", False)
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema
 
-    async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
+    async def create(self, instance_id: Optional[str] = None, dummy: Optional[float] = None, **kwargs) -> tuple[str, ToolResponse]:
         if instance_id is None:
             instance_id = str(uuid4())
         self._instance_dict[instance_id] = {
@@ -87,7 +88,7 @@ class RerankerTool(BaseTool):
         rerank_text = await self.rerank_request(data)
         return ToolResponse(text=rerank_text), 0.0, {}
 
-    async def calc_reward(self) -> float:
+    async def calc_reward(self, instance_id: str, **kwargs) -> float:
         return 0.0
 
     async def release(self, instance_id: str, **kwargs) -> None:
@@ -103,7 +104,7 @@ class RerankerTool(BaseTool):
 
                 rerank_text = ""
                 # rerank_text += "<information>\n"
-                for idx, (document, reasoning) in enumerate(zip(data["documents"], data["reasonings"], strict=False)):
+                for idx, (document, reasoning) in enumerate(zip(data["documents"][:self.reranker_topk], data["reasonings"][:self.reranker_topk], strict=False)):
                     content = document["text"]
                     if self.return_full_document:
                         title = content.split("\n")[0]

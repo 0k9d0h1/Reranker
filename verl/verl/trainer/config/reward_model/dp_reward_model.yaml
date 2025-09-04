@@ -53,3 +53,9 @@ model:
 
 # Sequence parallelism size for Ulysses-style model parallelism
 ulysses_sequence_parallel_size: 1
+
+reward_kwargs:
+  score: 1.0
+  structure_format_score: 0.2
+  final_format_score: 0.1
+  retrieval_score: 0.1

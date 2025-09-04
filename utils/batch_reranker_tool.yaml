@@ -1,8 +1,10 @@
 tools:
-  - class_name: "verl.verl.tools.reranker_tool.RerankerTool"
+  - class_name: "verl.tools.reranker_tool.RerankerTool"
     config:
-      reranker_server_url: "http://localhost:8002/rerank"
-      return_full_document: False
+      type: "native"
+      reranker_server_url: "http://localhost:8002/rerank/batch"
+      return_full_document: True
+      reranker_topk: 3
 
     tool_schema:
       type: "function"

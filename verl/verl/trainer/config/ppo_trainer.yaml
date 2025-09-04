@@ -173,6 +173,8 @@ algorithm:
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
 
+  no_think_rl: False
+
 # config for the trainer
 trainer:
 
@@ -367,3 +369,11 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+reranker:
+  url: "http://localhost:8002/rerank/batch"
+  topk: 3
+  return_full_documents: true
+
+max_turns: 3
+batched_reranking: true

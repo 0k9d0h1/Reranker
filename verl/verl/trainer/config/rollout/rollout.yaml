@@ -167,10 +167,11 @@ multi_turn:
   # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
   tokenization_sanity_check_mode: strict
 
-  max_turns: 3
-
   # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
   format: hermes
+
+  # Type of tool call parser to use
+  tool_call_parser_type: reranker
 
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling

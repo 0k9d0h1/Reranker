@@ -53,6 +53,7 @@ class MultiTurnConfig(BaseConfig):
     interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
+    tool_call_parser_type: str = "reranker"
     format: str = "hermes"
 
 

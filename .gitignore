@@ -3,9 +3,12 @@
 *.slurm
 *.whl
 *.out
+*.pyc
 
 logs/
-data/
+/data/
 outputs/
+wandb/
+__pycache__/
 
 test.py

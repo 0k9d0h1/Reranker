@@ -35,6 +35,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.planner_utils.planner_generation import PlannerGenerationManager, PlannerGenerationConfig
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -441,6 +442,8 @@ class RayPPOTrainer:
             "score": scores,
             "step": [self.global_steps] * n,
         }
+        print(base_data)
+        print(len(inputs), len(outputs), len(gts), len(scores))
 
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n:
@@ -508,85 +511,145 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
-        for test_data in self.val_dataloader:
-            test_batch = DataProto.from_single_dict(test_data)
+        gen_config = PlannerGenerationConfig(
+            max_turns=self.config.max_turns,
+            max_start_length=self.config.data.max_start_length,
+            max_prompt_length=self.config.data.max_prompt_length,
+            max_response_length=self.config.data.max_response_length,
+            max_obs_length=self.config.data.max_obs_length,
+            num_gpus=self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes,
+            no_think_rl=self.config.algorithm.no_think_rl,
+            search_url=self.config.reranker.url,
+            topk=self.config.reranker.topk,
+            return_full_documents=self.config.reranker.get("return_full_documents", False)
+        )
 
-            # repeat test batch
-            test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
-            )
+        # Agent config preparation
+        generation_manager = PlannerGenerationManager(
+            tokenizer=self.tokenizer,
+            actor_rollout_wg=self.actor_rollout_wg,
+            config=gen_config,
+            is_validation=True,
+        )
 
-            # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
-                return {}
+        if self.config.batched_reranking:
+            for batch_dict in self.val_dataloader:
+                timing_raw = {}
+                test_batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-            # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
+                # Store original inputs
+                input_ids = test_batch.batch["input_ids"]
+                # TODO: Can we keep special tokens except for padding tokens?
+                input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+                sample_inputs.extend(input_texts)
+                ground_truths = [
+                    item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
+                ]
+                sample_gts.extend(ground_truths)
+                # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
 
-            ground_truths = [
-                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
-            ]
-            sample_gts.extend(ground_truths)
+                test_gen_batch = test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+                test_gen_batch.meta_info = {
+                    "eos_token_id": self.tokenizer.eos_token_id,
+                    "pad_token_id": self.tokenizer.pad_token_id,
+                    "recompute_log_prob": False,
+                    "do_sample": True,
+                    "validate": True,
+                }
+                with marked_timer("step", timing_raw):
+                    first_input_ids = test_gen_batch.batch["input_ids"][:, -gen_config.max_start_length :].clone()
+                    with marked_timer("gen", timing_raw):
+                        generation_manager.timing_raw = timing_raw
+                        final_gen_batch_output = generation_manager.run_llm_loop(
+                            gen_batch=test_gen_batch,
+                            initial_input_ids=first_input_ids,
+                        )
 
-            test_gen_batch = self._get_gen_batch(test_batch)
-            test_gen_batch.meta_info = {
-                "eos_token_id": self.tokenizer.eos_token_id,
-                "pad_token_id": self.tokenizer.pad_token_id,
-                "recompute_log_prob": False,
-                "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
-                "validate": True,
-                "global_steps": self.global_steps,
-            }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+                    test_output_gen_batch = test_batch.union(final_gen_batch_output)
 
-            # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
-            else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+                    for key in test_batch.batch.keys():
+                        test_batch.batch[key] = test_batch.batch[key].long()
+                break
+        else:
+            for test_data in self.val_dataloader:
+                test_batch = DataProto.from_single_dict(test_data)
 
-            # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+                # repeat test batch
+                test_batch = test_batch.repeat(
+                    repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
+                )
 
-            print("validation generation end")
+                # we only do validation on rule-based rm
+                if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
+                    return {}
 
-            # Store generated outputs
-            output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
-            sample_outputs.extend(output_texts)
+                # Store original inputs
+                input_ids = test_batch.batch["input_ids"]
+                # TODO: Can we keep special tokens except for padding tokens?
+                input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+                sample_inputs.extend(input_texts)
 
-            test_batch = test_batch.union(test_output_gen_batch)
-            test_batch.meta_info["validate"] = True
+                ground_truths = [
+                    item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
+                ]
+                sample_gts.extend(ground_truths)
 
-            # evaluate using reward_function
-            if self.val_reward_fn is None:
-                raise ValueError("val_reward_fn must be provided for validation.")
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
-            scores = reward_tensor.sum(-1).cpu().tolist()
-            sample_scores.extend(scores)
+                test_gen_batch = self._get_gen_batch(test_batch)
+                test_gen_batch.meta_info = {
+                    "eos_token_id": self.tokenizer.eos_token_id,
+                    "pad_token_id": self.tokenizer.pad_token_id,
+                    "recompute_log_prob": False,
+                    "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
+                    "validate": True,
+                    "global_steps": self.global_steps,
+                }
+                print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
-            reward_extra_infos_dict["reward"].extend(scores)
-            print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+                # pad to be divisible by dp_size
+                size_divisor = (
+                    self.actor_rollout_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref.rollout.agent.num_workers
+                )
+                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+                if not self.async_rollout_mode:
+                    test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                else:
+                    test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
-            # collect num_turns of each prompt
-            if "__num_turns__" in test_batch.non_tensor_batch:
-                sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
+                # unpad
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+        print("validation generation end")
+
+        # Store generated outputs
+        output_ids = test_output_gen_batch.batch["responses"]
+        output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+        sample_outputs.extend(output_texts)
+
+        test_batch = test_batch.union(test_output_gen_batch)
+        test_batch.meta_info["validate"] = True
+
+        # evaluate using reward_function
+        if self.val_reward_fn is None:
+            raise ValueError("val_reward_fn must be provided for validation.")
+        result = self.val_reward_fn(test_batch, return_dict=True)
+        reward_tensor = result["reward_tensor"]
+        scores = reward_tensor.sum(-1).cpu().tolist()
+        sample_scores.extend(scores)
+
+        reward_extra_infos_dict["reward"].extend(scores)
+        print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
+        if "reward_extra_info" in result:
+            for key, lst in result["reward_extra_info"].items():
+                reward_extra_infos_dict[key].extend(lst)
+                print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+
+        # collect num_turns of each prompt
+        if "__num_turns__" in test_batch.non_tensor_batch:
+            sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
+
+        data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -911,6 +974,26 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        gen_config = PlannerGenerationConfig(
+                max_turns=self.config.max_turns,
+                max_start_length=self.config.data.max_start_length,
+                max_prompt_length=self.config.data.max_prompt_length,
+                max_response_length=self.config.data.max_response_length,
+                max_obs_length=self.config.data.max_obs_length,
+                num_gpus=self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes,
+                no_think_rl=self.config.algorithm.no_think_rl,
+                search_url=self.config.reranker.url,
+                topk=self.config.reranker.topk,
+                return_full_documents=self.config.reranker.get("return_full_documents", False)
+            )
+
+        # Agent config preparation
+        generation_manager = PlannerGenerationManager(
+            tokenizer=self.tokenizer,
+            actor_rollout_wg=self.actor_rollout_wg,
+            config=gen_config,
+        )
+
         self.global_steps = 0
 
         # load checkpoint before doing anything
@@ -976,10 +1059,17 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        if self.config.batched_reranking:
+                            first_input_ids = gen_batch.batch["input_ids"][:, -gen_config.max_start_length :].clone().long()
+                            gen_batch_output = generation_manager.run_llm_loop(
+                                gen_batch=gen_batch,
+                                initial_input_ids=first_input_ids,
+                            )
                         else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            if not self.async_rollout_mode:
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            else:
+                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
@@ -1007,6 +1097,11 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    response_length = batch.batch["responses"].shape[-1]
+                    response_mask = batch.batch["attention_mask"][:, -response_length:]
+
+                    batch.batch["response_mask"] = batch.batch["info_mask"][:, -response_length:]
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)

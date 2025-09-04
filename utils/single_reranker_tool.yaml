@@ -1,0 +1,20 @@
+tools:
+  - class_name: "verl.tools.reranker_tool.RerankerTool"
+    config:
+      type: "native"
+      reranker_server_url: "http://localhost:8002/rerank/single"
+      return_full_document: True
+      reranker_topk: 3
+
+    tool_schema:
+      type: "function"
+      function:
+        name: "reranker"
+        description: "A tool for searching and reranking documents for a query."
+        parameters:
+          type: "object"
+          properties:
+            query:
+              type: "string"
+              description: "The query to search for."
+          required: ["query"]

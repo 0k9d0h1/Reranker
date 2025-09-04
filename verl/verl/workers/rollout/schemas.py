@@ -358,17 +358,27 @@ class AsyncRolloutRequest(BaseModel):
         if generation_prompt_ids is not None:
             self._update_input_ids(processing_class, generation_prompt_ids, attention_mask=True, loss_mask=False)
 
+        tool_name = self.tool_schemas[0].function.name if len(self.tool_schemas or []) > 0 else "NoTool"
         if self.use_inference_chat_template:
             messages = [msg.model_dump() for msg in self.messages]
             tools = [tool.model_dump() for tool in self.tool_schemas] if self.tool_schemas else None
-            generation_prompt_ids = self._handle_apply_chat_template(
-                processing_class,
-                messages,
-                multi_modal_data=self.multi_modal_data,
-                tools=tools,
-                add_generation_prompt=True,
-                tokenize=True,
-            )
+            if "reranker" in tool_name:
+                generation_prompt_ids = self._handle_apply_chat_template(
+                    processing_class,
+                    messages,
+                    multi_modal_data=self.multi_modal_data,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                )
+            else:
+                generation_prompt_ids = self._handle_apply_chat_template(
+                    processing_class,
+                    messages,
+                    multi_modal_data=self.multi_modal_data,
+                    tools=tools,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                )
             return generation_prompt_ids.squeeze(0).tolist()
         else:
             return self.input_ids.squeeze(0).tolist()

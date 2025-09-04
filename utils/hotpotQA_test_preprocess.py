@@ -30,7 +30,7 @@ def make_instruction(question):
 
 Before performing any search or providing an answer, you must first reason about your next action, including before your initial search.
 
-After reasoning, if you require more information to answer the question, you may call the reranker function by placing your query between <search> and </search>. The reranker function will return the top results between <tool_response> and </tool_response>.
+After reasoning, if your knowledge is not enough to answer the question, you must call the reranker function by placing your query between <search> and </search>. The reranker function will return the top results between <information> and </information>.
 
 If the retrieved results do not contain enough information for answering the question, perform additional searches to gather more context.
 Continue searching iteratively until you have gathered sufficient information to respond accurately.
@@ -43,7 +43,7 @@ Question: {question}"""
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="~/data/hotpotQA")
+    parser.add_argument("--local_dir", default="./data/test")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
@@ -84,7 +84,7 @@ if __name__ == "__main__":
                     "need_tools_kwargs": True,
                     "tools_kwargs": {
                         "reranker": {
-                            "create_kwargs": {},
+                            "create_kwargs": {"dummy": 0.0},
                             # "execute_kwargs": {},
                             # "calc_reward_kwargs": {},
                             # "release_kwargs": {},
@@ -108,6 +108,8 @@ if __name__ == "__main__":
 
     train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
     test_dataset.to_parquet(os.path.join(local_dir, "test.parquet"))
+
+    print(f"Created parquet file with length {len(train_dataset)} and {len(test_dataset)}")
 
     if hdfs_dir is not None:
         makedirs(hdfs_dir)

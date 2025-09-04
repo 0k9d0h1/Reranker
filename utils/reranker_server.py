@@ -76,8 +76,12 @@ class DocumentIn(BaseModel):
     score: float
 
 
-class RerankRequest(BaseModel):
+class RerankSingleRequest(BaseModel):
     query: str
+
+
+class RerankBatchRequest(BaseModel):
+    queries: List[str]
 
 
 # --- 3. Internal Data Structures & Reranker Logic (same as before) ---
@@ -140,6 +144,37 @@ class APIRetriever:
                 else:
                     print(f"Failed to retrieve for query: {query}")
                     return []  # Return empty list on failure
+
+    def batch_retrieve(self, queries: List[str], top_k: int) -> List[List[Document]]:
+        """Retrieves documents for a single query."""
+        payload = {"queries": queries, "topk": top_k, "return_scores": True}
+        retries = 3
+        for i in range(retries):
+            try:
+                response = requests.post(self.config["url"], json=payload)
+                response.raise_for_status()
+                # Assuming the response format is like: {"result": [[{"document": {"contents": "...", "id": ...}, "score": ...}]]}
+                results = response.json()["result"]
+                batched_documents = []
+                for res in results:
+                    documents = []
+                    for j, r in enumerate(res):
+                        documents.append(
+                            Document(
+                                id=r["document"].get("id", str(j)),
+                                text=r["document"]["contents"],
+                                score=r["score"],
+                            )
+                        )
+                    batched_documents.append(documents)
+                return batched_documents
+            except requests.exceptions.RequestException as e:
+                print(f"Retriever request failed: {e}. Retrying ({i + 1}/{retries})...")
+                if i < retries - 1:
+                    time.sleep(0.5)
+                else:
+                    print(f"Failed to retrieve for query: {queries}")
+                    return []  # Return empty list on failure                
 
 
 class SplitRAGReranker:
@@ -327,14 +362,50 @@ class SplitRAGReranker:
 
         return RerankResult(documents=sorted_documents, reasoning=sorted_reasonings)
 
+    async def batch_rerank(self, queries: List[str]) -> List[RerankResult]:
+        batched_documents = self.retriever.batch_retrieve(
+            queries, self.retriever_config["top_k_initial"]
+        )
+        num_queries = len(queries)
+        queries_extended = []
+        for query, documents in zip(queries, batched_documents):
+            queries_extended.extend([query] * len(documents))
+        retriever_k = len(queries_extended) // num_queries
+        corpus = []
+        for documents in batched_documents:
+            for doc in documents:
+                corpus.append(doc.text)
+        print(queries_extended, corpus)
+        _, reasonings, scores = await self.predict(queries=queries_extended, passages=corpus)
+        # Split reasonings and scores back to per-query lists
+        split_reasonings = []
+        split_scores = []
+        for i in range(num_queries):
+            split_reasonings.append(reasonings[i * retriever_k:(i + 1) * retriever_k])
+            split_scores.append(scores[i * retriever_k:(i + 1) * retriever_k])
+        results = []
+        # Sort documents and reasoning by scores
+        for i, (reasonings, scores) in enumerate(zip(split_reasonings, split_scores)):
+            documents = batched_documents[i]
+            for document, score in zip(documents, scores):
+                document.score = score
+            sorted_indices = sorted(
+                range(len(scores)), key=lambda i: (scores[i][0], scores[i][1]), reverse=True
+            )
+            sorted_documents = [documents[i] for i in sorted_indices]
+            sorted_reasonings = [reasonings[i] for i in sorted_indices]
+
+            results.append(RerankResult(documents=sorted_documents, reasoning=sorted_reasonings))
+        return results
+
 
 # --- 4. FastAPI Application Setup ---
 app = FastAPI()
 reranker_model: Optional[Any] = None
 
 
-@app.post("/rerank")
-async def rerank_endpoint(request: RerankRequest):
+@app.post("/rerank/single")
+async def rerank_endpoint(request: RerankSingleRequest):
     """Endpoint to rerank documents using the loaded model."""
     if reranker_model is None:
         raise HTTPException(status_code=503, detail="Reranker model not loaded.")
@@ -344,6 +415,18 @@ async def rerank_endpoint(request: RerankRequest):
         "documents": [d.__dict__ for d in result.documents],
         "reasonings": result.reasoning,
     }
+
+@app.post("/rerank/batch")
+async def rerank_endpoint(request: RerankBatchRequest):
+    """Endpoint to rerank documents using the loaded model."""
+    if reranker_model is None:
+        raise HTTPException(status_code=503, detail="Reranker model not loaded.")
+    results = await reranker_model.batch_rerank(request.queries)
+
+    return [{
+        "documents": [d.__dict__ for d in result.documents],
+        "reasonings": result.reasoning,
+    } for result in results]
 
 
 @app.post("/shutdown")

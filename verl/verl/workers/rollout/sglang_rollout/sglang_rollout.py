@@ -71,10 +71,11 @@ from verl.workers.rollout.schemas import (
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
 
-try:
-    from sglang.srt.function_call.function_call_parser import FunctionCallParser
-except ImportError:
-    from sglang.srt.function_call_parser import FunctionCallParser
+# try:
+#     from sglang.srt.function_call.function_call_parser import FunctionCallParser
+# except ImportError:
+#     from sglang.srt.function_call_parser import FunctionCallParser
+from verl.workers.rollout.sglang_rollout.parser_with_reranker import FunctionCallParser
 
 try:
     from sglang.srt.entrypoints.openai.protocol import Tool
@@ -128,6 +129,9 @@ sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
 # which can not call loop.run_until_complete. So we need to make the engine to be an async class
 class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
     def __init__(self, **kwargs):
+        if "mm_attention_backend" in kwargs:
+            # Remove mm_attention_backend from kwargs to avoid passing unexpected argument due to version incompability
+            kwargs.pop("mm_attention_backend")
         super().__init__(**kwargs)
         # default to use dummy load format, which need to reload weights in first time
         self._need_reload = True
