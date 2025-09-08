@@ -4,6 +4,7 @@
 *.whl
 *.out
 *.pyc
+*.parquet
 
 logs/
 /data/
